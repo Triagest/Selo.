@@ -1,0 +1,211 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// SUPER-ADMIN (Gustavo + TRIA)
+// ============================================================================
+
+model SuperAdmin {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  passwordHash String
+  nome      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("super_admins")
+}
+
+// ============================================================================
+// TENANTS (Empresas clientes)
+// ============================================================================
+
+model Tenant {
+  id        String   @id @default(cuid())
+  name      String   // "IGI", "Outra OSS"
+  slug      String   @unique // "igi", "outra-oss" — para URL
+  logoUrl   String? // URL em S3 da logo do tenant
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  createdBy String // Super-admin que criou
+
+  // Relacionamentos
+  users              User[]
+  documentos         Documento[]
+  auditLogs          AuditLog[]
+  assinaturesPending AssinaturePendente[]
+
+  @@map("tenants")
+}
+
+// ============================================================================
+// USUÁRIOS (dentro de um tenant)
+// ============================================================================
+
+model User {
+  id               String   @id @default(cuid())
+  tenantId         String
+  tenant           Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  nome             String
+  username         String // "diretor", "operador1", etc
+  email            String
+  passwordHash     String
+  phone_number     String? // "+55XXXXXXXXXX" para WhatsApp
+  assinaturaUrl    String? // URL em S3 da foto de assinatura
+  isMaster         Boolean  @default(false) // Master user do tenant
+
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  // Relacionamentos
+  permissions      UserPermission[]
+  documentosCriados Documento[] @relation("CriadoPor")
+  assinaturasPendentes AssinaturePendente[]
+  assinaturasRealizadas AssinaturaRealizada[]
+  auditLogs        AuditLog[]
+
+  // Unique: username por tenant (não global)
+  @@unique([tenantId, username])
+  @@index([tenantId])
+  @@map("users")
+}
+
+// ============================================================================
+// PERMISSÕES GRANULARES
+// ============================================================================
+
+model Permission {
+  id          String   @id @default(cuid())
+  name        String   @unique // "gerenciar_usuarios", "fazer_upload_documentos", etc
+  description String
+
+  userPermissions UserPermission[]
+
+  @@map("permissions")
+}
+
+model UserPermission {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  permissionId String
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, permissionId])
+  @@map("user_permissions")
+}
+
+// ============================================================================
+// DOCUMENTOS
+// ============================================================================
+
+model Documento {
+  id           String   @id @default(cuid())
+  tenantId     String
+  tenant       Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  nome         String
+  s3Key        String   // Caminho em S3: "igi/documentos/2026-09-17/doc-123/original.pdf"
+  tamanho      Int      // Bytes
+
+  criadoPor    String
+  criadoPorUser User    @relation("CriadoPor", fields: [criadoPor], references: [id])
+
+  status       DocumentStatus @default(RASCUNHO) // rascunho → aguardando_assinatura → em_assinatura → completo
+
+  createdAt    DateTime @default(now())
+  completedAt  DateTime? // Quando foi completo (todas as assinaturas feitas)
+
+  // Relacionamentos
+  assinaturasPendentes AssinaturePendente[]
+
+  @@index([tenantId])
+  @@index([status])
+  @@map("documentos")
+}
+
+enum DocumentStatus {
+  RASCUNHO
+  AGUARDANDO_ASSINATURA
+  EM_ASSINATURA
+  COMPLETO
+  ARQUIVADO
+}
+
+// ============================================================================
+// ASSINATURAS
+// ============================================================================
+
+model AssinaturePendente {
+  id                String   @id @default(cuid())
+  tenantId          String
+  tenant            Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  documentoId       String
+  documento         Documento @relation(fields: [documentoId], references: [id], onDelete: Cascade)
+
+  usuarioId         String
+  usuario           User     @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
+
+  ordemSequencia    Int      // 1, 2, 3... (ordem em que deve assinar)
+
+  notificacaoWhatsapp String? // Número de telefone para notificação
+
+  assinadoEm        DateTime? // Quando foi assinado (NULL se ainda não)
+  canceladoEm       DateTime? // Se foi cancelado
+
+  // Relacionamentos
+  assinaturaRealizada AssinaturaRealizada? // Uma assinatura pendente pode ter apenas uma realizada
+
+  @@index([tenantId])
+  @@index([documentoId])
+  @@index([usuarioId])
+  @@map("assinaturas_pendentes")
+}
+
+model AssinaturaRealizada {
+  id                      String   @id @default(cuid())
+  assinaturaPendenteId    String   @unique
+  assinaturaPendente      AssinaturePendente @relation(fields: [assinaturaPendenteId], references: [id], onDelete: Cascade)
+
+  documentoAssinadoS3Key  String   // Caminho do PDF assinado em S3
+  dataHora                DateTime @default(now())
+  ipAddress               String?
+  userAgent               String?
+
+  @@map("assinaturas_realizadas")
+}
+
+// ============================================================================
+// AUDIT LOG (Append-only, nunca delete/update)
+// ============================================================================
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  usuarioId   String
+  usuario     User     @relation(fields: [usuarioId], references: [id], onDelete: SetNull)
+
+  acao        String   // "login", "upload_doc", "assinar", "delete_user", etc
+  recursoId   String?  // Ex: documento_id, user_id, assinatura_id
+  detalhes    Json?    // Dados adicionais em JSON
+
+  dataHora    DateTime @default(now())
+
+  @@index([tenantId])
+  @@index([usuarioId])
+  @@index([dataHora])
+  @@map("audit_logs")
+}
