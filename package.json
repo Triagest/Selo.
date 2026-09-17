@@ -13,6 +13,7 @@
     "@aws-sdk/s3-request-presigner": "^3.1134.0",
     "@prisma/client": "^7.10.0",
     "@tailwindcss/postcss": "^4",
+    "@types/jsonwebtoken": "^9.0.7",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
